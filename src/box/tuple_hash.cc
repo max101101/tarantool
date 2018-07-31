@@ -230,7 +230,7 @@ key_hash_slowpath(const char *key, const struct key_def *key_def);
 
 void
 tuple_hash_func_set(struct key_def *key_def) {
-	if (key_def->is_nullable)
+	if (key_def->is_nullable || key_def->has_json_paths)
 		goto slowpath;
 	/*
 	 * Check that key_def defines sequential a key without holes
@@ -264,10 +264,17 @@ tuple_hash_func_set(struct key_def *key_def) {
 	}
 
 slowpath:
-	if (key_def->has_optional_parts)
-		key_def->tuple_hash = tuple_hash_slowpath<true, false>;
-	else
-		key_def->tuple_hash = tuple_hash_slowpath<false, false>;
+	if (key_def->has_optional_parts) {
+		if (key_def->has_json_paths)
+			key_def->tuple_hash = tuple_hash_slowpath<true, true>;
+		else
+			key_def->tuple_hash = tuple_hash_slowpath<true, false>;
+	} else {
+		if (key_def->has_json_paths)
+			key_def->tuple_hash = tuple_hash_slowpath<false, true>;
+		else
+			key_def->tuple_hash = tuple_hash_slowpath<false, false>;
+	}
 	key_def->key_hash = key_hash_slowpath;
 }
 
@@ -335,6 +342,7 @@ template <bool has_optional_parts, bool has_json_paths>
 uint32_t
 tuple_hash_slowpath(const struct tuple *tuple, const struct key_def *key_def)
 {
+	assert(has_json_paths == key_def->has_json_paths);
 	assert(has_optional_parts == key_def->has_optional_parts);
 	uint32_t h = HASH_SEED;
 	uint32_t carry = 0;
