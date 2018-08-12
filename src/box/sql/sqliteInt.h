@@ -1857,7 +1857,6 @@ struct Table {
 	 * can be fetched from space struct.
 	 */
 	LogEst tuple_log_count;
-	Schema *pSchema;	/* Schema that contains this table */
 	Table *pNextZombie;	/* Next on the Parse.pZombieTab list */
 	/** Space definition with Tarantool metadata. */
 	struct space_def *def;
