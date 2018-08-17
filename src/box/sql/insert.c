@@ -960,7 +960,7 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 	 * FIXME: should be removed after introducing
 	 * strict typing.
 	 */
-	struct Index *pk = sqlite3PrimaryKeyIndex(tab);
+	struct index *pk = sql_table_primary_key(tab);
 	uint32_t part_count = pk->def->key_def->part_count;
 	if (part_count == 1) {
 		uint32_t fieldno = pk->def->key_def->parts[0].fieldno;
@@ -984,7 +984,8 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 		return;
 	/* Calculate MAX range of register we may occupy. */
 	uint32_t reg_count = 0;
-	for (struct Index *idx = tab->pIndex; idx != NULL; idx = idx->pNext) {
+	for (uint32_t i = 0; i < tab->space->index_count; ++i) {
+		struct index *idx = tab->space->index[i];
 		if (idx->def->key_def->part_count > reg_count)
 			reg_count = idx->def->key_def->part_count;
 	}
@@ -1000,9 +1001,10 @@ vdbe_emit_constraint_checks(struct Parse *parse_context, struct Table *tab,
 	 * Otherwise, we should skip removal of old entry and
 	 * insertion of new one.
 	 */
-	for (struct Index *idx = tab->pIndex; idx != NULL; idx = idx->pNext) {
+	for (uint32_t i = 0; i < tab->space->index_count; ++i) {
+		struct index *idx = tab->space->index[i];
 		/* Conflicts may occur only in UNIQUE indexes. */
-		if (!idx->def->opts.is_unique)
+		if (! idx->def->opts.is_unique)
 			continue;
 		if (on_conflict == ON_CONFLICT_ACTION_IGNORE) {
 			/*
@@ -1091,40 +1093,42 @@ int sqlite3_xferopt_count;
 #endif				/* SQLITE_TEST */
 
 #ifndef SQLITE_OMIT_XFER_OPT
-/*
- * Check to see if index pSrc is compatible as a source of data
- * for index pDest in an insert transfer optimization.  The rules
+/**
+ * Check to see if index @src is compatible as a source of data
+ * for index @dest in an insert transfer optimization. The rules
  * for a compatible index:
  *
- *    *   The index is over the same set of columns
- *    *   The same DESC and ASC markings occurs on all columns
- *    *   The same onError processing (ON_CONFLICT_ACTION_ABORT, _IGNORE, etc)
- *    *   The same collating sequence on each column
- *    *   The index has the exact same WHERE clause
+ * - The index is over the same set of columns;
+ * - The same DESC and ASC markings occurs on all columns;
+ * - The same collating sequence on each column.
+ *
+ * @param dest Index of destination space.
+ * @param src Index of source space.
+ *
+ * @retval
  */
-static int
-xferCompatibleIndex(Index * pDest, Index * pSrc)
+static bool
+sql_index_is_xfer_compatible(const struct index_def *dest,
+			     const struct index_def *src)
 {
-	assert(pDest && pSrc);
-	assert(pDest->pTable != pSrc->pTable);
-	uint32_t dest_idx_part_count = pDest->def->key_def->part_count;
-	uint32_t src_idx_part_count = pSrc->def->key_def->part_count;
+	assert(dest != NULL && src != NULL);
+	assert(dest->space_id != src->space_id);
+	uint32_t dest_idx_part_count = dest->key_def->part_count;
+	uint32_t src_idx_part_count = src->key_def->part_count;
 	if (dest_idx_part_count != src_idx_part_count)
-		return 0;
-	struct key_part *src_part = pSrc->def->key_def->parts;
-	struct key_part *dest_part = pDest->def->key_def->parts;
+		return false;
+	struct key_part *src_part = src->key_def->parts;
+	struct key_part *dest_part = dest->key_def->parts;
 	for (uint32_t i = 0; i < src_idx_part_count;
 	     ++i, ++src_part, ++dest_part) {
 		if (src_part->fieldno != dest_part->fieldno)
-			return 0;	/* Different columns indexed */
+			return false;
 		if (src_part->sort_order != dest_part->sort_order)
-			return 0;	/* Different sort orders */
+			return false;
 		if (src_part->coll != dest_part->coll)
-			return 0;	/* Different collating sequences */
+			return false;
 	}
-
-	/* If no test above fails then the indices must be compatible */
-	return 1;
+	return true;
 }
 
 /*
@@ -1158,7 +1162,7 @@ xferOptimization(Parse * pParse,	/* Parser context */
 {
 	ExprList *pEList;	/* The result set of the SELECT */
 	Table *pSrc;		/* The table in the FROM clause of SELECT */
-	Index *pSrcIdx, *pDestIdx;	/* Source and destination indices */
+	struct index *pSrcIdx, *pDestIdx;
 	struct SrcList_item *pItem;	/* An element of pSelect->pSrc */
 	int i;			/* Loop counter */
 	int iSrc, iDest;	/* Cursors from source and destination */
@@ -1262,17 +1266,10 @@ xferOptimization(Parse * pParse,	/* Parser context */
 		}
 		/* Default values for second and subsequent columns need to match. */
 		if (i > 0) {
-			uint32_t src_space_id = pSrc->def->id;
-			struct space *src_space =
-				space_cache_find(src_space_id);
-			uint32_t dest_space_id = pDest->def->id;
-			struct space *dest_space =
-				space_cache_find(dest_space_id);
-			assert(src_space != NULL && dest_space != NULL);
 			char *src_expr_str =
-				src_space->def->fields[i].default_value;
+				pSrc->def->fields[i].default_value;
 			char *dest_expr_str =
-				dest_space->def->fields[i].default_value;
+				pDest->def->fields[i].default_value;
 			if ((dest_expr_str == NULL) != (src_expr_str == NULL) ||
 			    (dest_expr_str &&
 			     strcmp(src_expr_str, dest_expr_str) != 0)
@@ -1281,11 +1278,14 @@ xferOptimization(Parse * pParse,	/* Parser context */
 			}
 		}
 	}
-	for (pDestIdx = pDest->pIndex; pDestIdx; pDestIdx = pDestIdx->pNext) {
+	for (uint32_t i = 0; i < pDest->space->index_count; ++i) {
+		pDestIdx = pDest->space->index[i];
 		if (pDestIdx->def->opts.is_unique)
 			destHasUniqueIdx = 1;
-		for (pSrcIdx = pSrc->pIndex; pSrcIdx; pSrcIdx = pSrcIdx->pNext) {
-			if (xferCompatibleIndex(pDestIdx, pSrcIdx))
+		for (uint32_t j = 0; j < pSrc->space->index_count; ++j) {
+			pSrcIdx = pSrc->space->index[j];
+			if (sql_index_is_xfer_compatible(pDestIdx->def,
+							 pSrcIdx->def))
 				break;
 		}
 		/* pDestIdx has no corresponding index in pSrc. */
@@ -1328,8 +1328,7 @@ xferOptimization(Parse * pParse,	/* Parser context */
 	regTupleid = sqlite3GetTempReg(pParse);
 	sqlite3OpenTable(pParse, iDest, pDest, OP_OpenWrite);
 	assert(destHasUniqueIdx);
-	if ((pDest->pIndex != 0)	/* (1) */
-	    ||destHasUniqueIdx	/* (2) */
+	if (destHasUniqueIdx	/* (2) */
 	    || (onError != ON_CONFLICT_ACTION_ABORT
 		&& onError != ON_CONFLICT_ACTION_ROLLBACK)	/* (3) */
 	    ) {
@@ -1353,12 +1352,6 @@ xferOptimization(Parse * pParse,	/* Parser context */
 		sqlite3VdbeJumpHere(v, addr1);
 	}
 
-	for (pDestIdx = pDest->pIndex; pDestIdx; pDestIdx = pDestIdx->pNext) {
-		for (pSrcIdx = pSrc->pIndex; ALWAYS(pSrcIdx);
-		     pSrcIdx = pSrcIdx->pNext) {
-			if (xferCompatibleIndex(pDestIdx, pSrcIdx))
-				break;
-		}
 		assert(pSrcIdx);
 		struct space *src_space =
 			space_by_id(pSrc->def->id);
@@ -1375,14 +1368,13 @@ xferOptimization(Parse * pParse,	/* Parser context */
 		VdbeCoverage(v);
 		sqlite3VdbeAddOp2(v, OP_RowData, iSrc, regData);
 		sqlite3VdbeAddOp2(v, OP_IdxInsert, iDest, regData);
-		if (sql_index_is_primary(pDestIdx))
+		if (pDestIdx->def->iid == 0)
 			sqlite3VdbeChangeP5(v, OPFLAG_NCHANGE);
 		sqlite3VdbeAddOp2(v, OP_Next, iSrc, addr1 + 1);
 		VdbeCoverage(v);
 		sqlite3VdbeJumpHere(v, addr1);
 		sqlite3VdbeAddOp2(v, OP_Close, iSrc, 0);
 		sqlite3VdbeAddOp2(v, OP_Close, iDest, 0);
-	}
 	if (emptySrcTest)
 		sqlite3VdbeJumpHere(v, emptySrcTest);
 	sqlite3ReleaseTempReg(pParse, regTupleid);

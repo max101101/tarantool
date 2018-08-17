@@ -35,11 +35,9 @@
  * Both Tarantool and SQLite codebases declare Index, hence the
  * workaround below.
  */
-#define Index SqliteIndex
 #include "sql/sqliteInt.h"
 #include "sql/tarantoolInt.h"
 #include "sql/vdbeInt.h"
-#undef Index
 
 #include "index.h"
 #include "info.h"
@@ -1284,7 +1282,7 @@ int tarantoolSqlite3MakeTableFormat(Table *pTable, void *buf)
 	const struct Enc *enc = get_enc(buf);
 	const struct space_def *def = pTable->def;
 	assert(def != NULL);
-	struct SqliteIndex *pk_idx = sqlite3PrimaryKeyIndex(pTable);
+	struct index *pk_idx = sql_table_primary_key(pTable);
 	int pk_forced_int = -1;
 	char *base = buf, *p;
 	int i, n = def->field_count;
@@ -1406,27 +1404,20 @@ fkey_encode_links(const struct fkey_def *def, int type, char *buf)
 	return p - buf;
 }
 
-/*
- * Format "parts" array for _index entry.
- * Returns result size.
- * If buf==NULL estimate result size.
- *
- * Ex: [[0, "integer"]]
- */
-int tarantoolSqlite3MakeIdxParts(SqliteIndex *pIndex, void *buf)
+int
+sql_construct_index_parts(const struct field_def *fields,
+			  const struct index_def *idx_def,
+			  const struct index_def *pk_def, void *buf)
 {
-	struct field_def *fields = pIndex->pTable->def->fields;
-	struct key_def *key_def = pIndex->def->key_def;
+	struct key_def *key_def = idx_def->key_def;
 	const struct Enc *enc = get_enc(buf);
 	char *base = buf;
 	uint32_t pk_forced_int = UINT32_MAX;
-	struct SqliteIndex *primary_index =
-		sqlite3PrimaryKeyIndex(pIndex->pTable);
 
 	/* If table's PK is single column which is INTEGER, then
 	 * treat it as strict type, not affinity.  */
-	if (primary_index->def->key_def->part_count == 1) {
-		int pk = primary_index->def->key_def->parts[0].fieldno;
+	if (pk_def->key_def->part_count == 1) {
+		int pk = pk_def->key_def->parts[0].fieldno;
 		if (fields[pk].type == FIELD_TYPE_INTEGER)
 			pk_forced_int = pk;
 	}
@@ -1478,29 +1469,18 @@ int tarantoolSqlite3MakeIdxParts(SqliteIndex *pIndex, void *buf)
 	return p - base;
 }
 
-/*
- * Format "opts" dictionary for _index entry.
- * Returns result size.
- * If buf==NULL estimate result size.
- *
- * Ex: {
- *   "unique": "true",
- *   "sql": "CREATE INDEX student_by_name ON students(name)"
- * }
- */
-int tarantoolSqlite3MakeIdxOpts(SqliteIndex *index, const char *zSql, void *buf)
+int
+sql_construct_index_opts(const struct index_def *idx_def, void *buf)
 {
 	const struct Enc *enc = get_enc(buf);
 	char *base = buf, *p;
-
-	(void)index;
-
 	p = enc->encode_map(base, 2);
-	/* Mark as unique pk and unique indexes */
 	p = enc->encode_str(p, "unique", 6);
-	p = enc->encode_bool(p, index->def->opts.is_unique);
+	p = enc->encode_bool(p, idx_def->opts.is_unique);
 	p = enc->encode_str(p, "sql", 3);
-	p = enc->encode_str(p, zSql, zSql ? strlen(zSql) : 0);
+	const char *sql_stmt = idx_def->opts.sql;
+	p = enc->encode_str(p, sql_stmt, sql_stmt != NULL ?
+					 strlen(sql_stmt) : 0);
 	return (int)(p - base);
 }
 
@@ -1614,6 +1594,14 @@ sql_ephemeral_table_new(Parse *parser, const char *name)
 	if (table != NULL)
 		def = sql_ephemeral_space_def_new(parser, name);
 	if (def == NULL) {
+		sqlite3DbFree(db, table);
+		return NULL;
+	}
+	table->space = (struct space *) calloc(1, sizeof(struct space));
+	if (table->space == NULL) {
+		diag_set(OutOfMemory, sizeof(struct space), "calloc", "space");
+		parser->rc = SQL_TARANTOOL_ERROR;
+		parser->nErr++;
 		sqlite3DbFree(db, table);
 		return NULL;
 	}

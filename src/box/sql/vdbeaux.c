@@ -1055,12 +1055,12 @@ sqlite3VdbeAppendP4(Vdbe * p, void *pP4, int n)
 }
 
 void
-sql_vdbe_set_p4_key_def(struct Parse *parse, struct Index *idx)
+sql_vdbe_set_p4_key_def(struct Parse *parse, struct index_def *idx_def)
 {
 	struct Vdbe *v = parse->pVdbe;
 	assert(v != NULL);
-	assert(idx != NULL);
-	struct key_def *def = key_def_dup(idx->def->key_def);
+	assert(idx_def != NULL);
+	struct key_def *def = key_def_dup(idx_def->key_def);
 	if (def == NULL)
 		sqlite3OomFault(parse->db);
 	else

@@ -777,14 +777,12 @@ callStatGet(Vdbe * v, int regStat4, int iParam, int regOut)
 static void
 analyzeOneTable(Parse * pParse,	/* Parser context */
 		Table * pTab,	/* Table whose indices are to be analyzed */
-		Index * pOnlyIdx,	/* If not NULL, only analyze this one index */
 		int iStatCur,	/* Index of VdbeCursor that writes the _sql_stat1 table */
 		int iMem,	/* Available memory locations begin here */
 		int iTab	/* Next available cursor */
     )
 {
 	sqlite3 *db = pParse->db;	/* Database handle */
-	Index *pIdx;		/* An index to being analyzed */
 	int iIdxCur;		/* Cursor open on index being analyzed */
 	int iTabCur;		/* Table cursor */
 	Vdbe *v;		/* The virtual machine being built up */
@@ -819,23 +817,27 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 	pParse->nTab = MAX(pParse->nTab, iTab);
 	sqlite3OpenTable(pParse, iTabCur, pTab, OP_OpenRead);
 	sqlite3VdbeLoadString(v, regTabname, pTab->def->name);
-
-	for (pIdx = pTab->pIndex; pIdx; pIdx = pIdx->pNext) {
+	/*
+	 * Here we need real space from Tarantool DD since
+	 * further it is passed to cursor opening routine.
+	 */
+	struct space *space = space_by_id(pTab->def->id);
+	assert(space != NULL);
+	for (uint32_t j = 0; j < space->index_count; ++j) {
+		struct index *idx = pTab->space->index[j];
 		int addrRewind;	/* Address of "OP_Rewind iIdxCur" */
 		int addrNextRow;	/* Address of "next_row:" */
 		const char *idx_name;	/* Name of the index */
 
-		if (pOnlyIdx && pOnlyIdx != pIdx)
-			continue;
 		/* Primary indexes feature automatically generated
 		 * names. Thus, for the sake of clarity, use
 		 * instead more familiar table name.
 		 */
-		if (sql_index_is_primary(pIdx))
+		if (idx->def->iid == 0)
 			idx_name = pTab->def->name;
 		else
-			idx_name = pIdx->def->name;
-		int part_count = pIdx->def->key_def->part_count;
+			idx_name = idx->def->name;
+		int part_count = idx->def->key_def->part_count;
 
 		/* Populate the register containing the index name. */
 		sqlite3VdbeLoadString(v, regIdxname, idx_name);
@@ -882,12 +884,9 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		pParse->nMem = MAX(pParse->nMem, regPrev + part_count);
 
 		/* Open a read-only cursor on the index being analyzed. */
-		struct space *space = space_by_id(pIdx->def->space_id);
-		int idx_id = pIdx->def->iid;
-		assert(space != NULL);
-		sqlite3VdbeAddOp4(v, OP_OpenRead, iIdxCur, idx_id, 0,
+		sqlite3VdbeAddOp4(v, OP_OpenRead, iIdxCur, idx->def->iid, 0,
 				  (void *) space, P4_SPACEPTR);
-		VdbeComment((v, "%s", pIdx->def->name));
+		VdbeComment((v, "%s", idx->def->name));
 
 		/* Invoke the stat_init() function. The arguments are:
 		 *
@@ -939,7 +938,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 			 */
 			sqlite3VdbeAddOp0(v, OP_Goto);
 			addrNextRow = sqlite3VdbeCurrentAddr(v);
-			if (part_count == 1 && pIdx->def->opts.is_unique) {
+			if (part_count == 1 && idx->def->opts.is_unique) {
 				/* For a single-column UNIQUE index, once we have found a non-NULL
 				 * row, we know that all the rest will be distinct, so skip
 				 * subsequent distinctness tests.
@@ -948,7 +947,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 						  endDistinctTest);
 				VdbeCoverage(v);
 			}
-			struct key_part *part = pIdx->def->key_def->parts;
+			struct key_part *part = idx->def->key_def->parts;
 			for (i = 0; i < part_count; ++i, ++part) {
 				struct coll *coll = part->coll;
 				sqlite3VdbeAddOp2(v, OP_Integer, i, regChng);
@@ -972,7 +971,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 			 *  ...
 			 */
 			sqlite3VdbeJumpHere(v, addrNextRow - 1);
-			part = pIdx->def->key_def->parts;
+			part = idx->def->key_def->parts;
 			for (i = 0; i < part_count; ++i, ++part) {
 				sqlite3VdbeJumpHere(v, aGotoChng[i]);
 				sqlite3VdbeAddOp3(v, OP_Column, iIdxCur,
@@ -990,17 +989,17 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		 *   if !eof(csr) goto next_row;
 		 */
 		assert(regKey == (regStat4 + 2));
-		Index *pPk = sqlite3PrimaryKeyIndex(pIdx->pTable);
+		struct index *pPk = sql_table_primary_key(pTab);
 		int pk_part_count = pPk->def->key_def->part_count;
 		/* Allocate memory for array. */
 		pParse->nMem = MAX(pParse->nMem,
 				   regPrev + part_count + pk_part_count);
 		int regKeyStat = regPrev + part_count;
-		for (int j = 0; j < pk_part_count; ++j) {
-			uint32_t k = pPk->def->key_def->parts[j].fieldno;
+		for (i = 0; i < pk_part_count; i++) {
+			uint32_t k = pPk->def->key_def->parts[i].fieldno;
 			assert(k < pTab->def->field_count);
 			sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, k,
-					  regKeyStat + j);
+					  regKeyStat + i);
 			VdbeComment((v, "%s", pTab->def->fields[k].name));
 		}
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regKeyStat,
@@ -1048,8 +1047,9 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		 */
 		VdbeCoverageNeverTaken(v);
 		for (i = 0; i < part_count; i++) {
-			sqlite3ExprCodeLoadIndexColumn(pParse, pIdx, iTabCur, i,
-						       regCol + i);
+			uint32_t tabl_col = idx->def->key_def->parts[i].fieldno;
+			sqlite3ExprCodeGetColumnOfTable(v, space->def, iTabCur,
+							tabl_col, regCol + i);
 		}
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regCol, part_count,
 				  regSample);
@@ -1093,7 +1093,7 @@ sql_analyze_database(Parse *parser)
 	     k = sqliteHashNext(k)) {
 		struct Table *table = (struct Table *) sqliteHashData(k);
 		if (! table->def->opts.is_view) {
-			analyzeOneTable(parser, table, NULL, stat_cursor, reg,
+			analyzeOneTable(parser, table, stat_cursor, reg,
 					tab_cursor);
 		}
 	}
@@ -1115,7 +1115,7 @@ vdbe_emit_analyze_table(struct Parse *parse, struct Table *table)
 	int stat_cursor = parse->nTab;
 	parse->nTab += 3;
 	vdbe_emit_stat_space_open(parse, stat_cursor, table->def->name);
-	analyzeOneTable(parse, table, NULL, stat_cursor, parse->nMem + 1,
+	analyzeOneTable(parse, table, stat_cursor, parse->nMem + 1,
 			parse->nTab);
 	loadAnalysis(parse);
 }
@@ -1635,22 +1635,25 @@ sql_space_tuple_log_count(struct Table *tab)
 }
 
 log_est_t
-index_field_tuple_est(struct Index *idx, uint32_t field)
+index_field_tuple_est(const struct index_def *idx_def, uint32_t field)
 {
-	struct space *space = space_by_id(idx->pTable->def->id);
-	if (space == NULL || strcmp(idx->def->opts.sql, "fake_autoindex") == 0)
-		return idx->def->opts.stat->tuple_log_est[field];
-	struct index *tnt_idx = space_index(space, idx->def->iid);
+	assert(idx_def != NULL);
+	struct space *space = space_by_id(idx_def->space_id);
+	if (space == NULL || (idx_def->opts.sql != NULL &&
+			      strcmp(idx_def->opts.sql, "fake_autoindex") == 0))
+		return idx_def->opts.stat->tuple_log_est[field];
+	assert(field <= idx_def->key_def->part_count);
+	/* Statistics is held only in real indexes. */
+	struct index *tnt_idx = space_index(space, idx_def->iid);
 	assert(tnt_idx != NULL);
-	assert(field <= tnt_idx->def->key_def->part_count);
 	if (tnt_idx->def->opts.stat == NULL) {
 		/*
 		 * Last number for unique index is always 0:
 		 * only one tuple exists with given full key
 		 * in unique index and log(1) == 0.
 		 */
-		if (field == tnt_idx->def->key_def->part_count &&
-		    tnt_idx->def->opts.is_unique)
+		if (field == idx_def->key_def->part_count &&
+		    idx_def->opts.is_unique)
 			return 0;
 		return default_tuple_est[field + 1 >= 6 ? 6 : field];
 	}

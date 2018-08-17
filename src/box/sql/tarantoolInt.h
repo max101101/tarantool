@@ -178,19 +178,37 @@ int tarantoolSqlite3MakeTableOpts(Table * pTable, const char *zSql, char *buf);
 int
 fkey_encode_links(const struct fkey_def *def, int type, char *buf);
 
-/*
+/**
  * Format "parts" array for _index entry.
- * Returns result size.
- * If buf==NULL estimate result size.
+ * If buf == NULL estimate result size.
+ *
+ * @param fields Fields of space index belongs to.
+ * @param idx_def Definition of index under construction.
+ * @param pk_def Definition of primary index.
+ * @param[out] buf Encoded record. Can be NULL.
+ *
+ * @retval Size of encoded parts.
  */
-int tarantoolSqlite3MakeIdxParts(Index * index, void *buf);
+int
+sql_construct_index_parts(const struct field_def *fields,
+			  const struct index_def *idx_def,
+			  const struct index_def *pk_def, void *buf);
 
-/*
+/**
  * Format "opts" dictionary for _index entry.
- * Returns result size.
- * If buf==NULL estimate result size.
+ * If buf == NULL estimate result size.
+ *
+ * Ex: {
+ *   "unique": "true",
+ *   "sql": "CREATE INDEX student_by_name ON students(name)"
+ * }
+ *
+ * @param idx_def Definition of index under construction.
+ * @param[out] buf Encoded record. Can be NULL.
+ *
+ * @retval Size of encoded parts.
  */
-int tarantoolSqlite3MakeIdxOpts(Index * index, const char *zSql, void *buf);
+int sql_construct_index_opts(const struct index_def *idx_def, void *buf);
 
 /**
  * Extract next id from _sequence space.
