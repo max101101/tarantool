@@ -124,7 +124,7 @@
  * @param parse Parsing context.
  * @param stat_cursor Open the _sql_stat1 table on this cursor.
  *        you should allocate |stat_names| cursors before call.
- * @param table_name Delete records of this index if specified.
+ * @param table_name Delete records of this table if specified.
  */
 static void
 vdbe_emit_stat_space_open(struct Parse *parse, int stat_cursor,
@@ -137,12 +137,6 @@ vdbe_emit_stat_space_open(struct Parse *parse, int stat_cursor,
 	assert(sqlite3VdbeDb(v) == parse->db);
 	for (uint i = 0; i < lengthof(stat_names); ++i) {
 		const char *space_name = stat_names[i];
-		/*
-		 * The table already exists, because it is a
-		 * system space.
-		 */
-		assert(sqlite3HashFind(&parse->db->pSchema->tblHash,
-				       space_name) != NULL);
 		if (table_name != NULL) {
 			vdbe_emit_stat_space_clear(parse, space_name, NULL,
 						   table_name);
@@ -770,61 +764,62 @@ callStatGet(Vdbe * v, int regStat4, int iParam, int regOut)
 	sqlite3VdbeChangeP5(v, 2);
 }
 
-/*
+/**
  * Generate code to do an analysis of all indices associated with
  * a single table.
+ *
+ * @param pParse Current parsing context.
+ * @param space Space to be analyzed.
+ * @param stat_cursor Cursor pointing to spaces containing
+ *        statistics: _sql_stat1 (stat_cursor) and
+ *        _sql_stat4 (stat_cursor + 1).
  */
 static void
-analyzeOneTable(Parse * pParse,	/* Parser context */
-		Table * pTab,	/* Table whose indices are to be analyzed */
-		int iStatCur,	/* Index of VdbeCursor that writes the _sql_stat1 table */
-		int iMem,	/* Available memory locations begin here */
-		int iTab	/* Next available cursor */
-    )
+vdbe_emit_analyze_space(struct Parse *pParse, struct space *space,
+			int stat_cursor)
 {
 	sqlite3 *db = pParse->db;	/* Database handle */
 	int iIdxCur;		/* Cursor open on index being analyzed */
 	int iTabCur;		/* Table cursor */
 	Vdbe *v;		/* The virtual machine being built up */
 	int i;			/* Loop counter */
-	int regStat4 = iMem++;	/* Register to hold Stat4Accum object */
-	int regChng = iMem++;	/* Index of changed index field */
-	int regKey = iMem++;	/* Key argument passed to stat_push() */
-	int regTemp = iMem++;	/* Temporary use register */
-	int regTabname = iMem++;	/* Register containing table name */
-	int regIdxname = iMem++;	/* Register containing index name */
-	int regStat1 = iMem++;	/* Value for the stat column of _sql_stat1 */
-	int regPrev = iMem;	/* MUST BE LAST (see below) */
+	/* Register to hold Stat4Accum object. */
+	int regStat4 = ++pParse->nMem;
+	/* Index of changed index field. */
+	int regChng = ++pParse->nMem;
+	/* Key argument passed to stat_push(). */
+	int regKey = ++pParse->nMem;
+	/* Temporary use register. */
+	int regTemp = ++pParse->nMem;
+	/* Register containing table name. */
+	int regTabname = ++pParse->nMem;
+	/* Register containing index name. */
+	int regIdxname = ++pParse->nMem;
+	/* Value for the stat column of _sql_stat1. */
+	int regStat1 = ++pParse->nMem;
+	/* MUST BE LAST (see below). */
+	int regPrev = ++pParse->nMem;
 
-	pParse->nMem = MAX(pParse->nMem, iMem);
+	assert(space != NULL);
 	v = sqlite3GetVdbe(pParse);
-	if (v == 0 || NEVER(pTab == 0)) {
-		return;
-	}
-	assert(pTab->def->id != 0);
-	if (sqlite3_strlike("\\_%", pTab->def->name, '\\') == 0) {
+	assert(v != NULL);
+	if (sqlite3_strlike("\\_%", space->def->name, '\\') == 0) {
 		/* Do not gather statistics on system tables */
 		return;
 	}
 
-	/* Establish a read-lock on the table at the shared-cache level.
-	 * Open a read-only cursor on the table. Also allocate a cursor number
-	 * to use for scanning indexes (iIdxCur). No index cursor is opened at
-	 * this time though.
-	 */
-	iTabCur = iTab++;
-	iIdxCur = iTab++;
-	pParse->nTab = MAX(pParse->nTab, iTab);
-	sqlite3OpenTable(pParse, iTabCur, pTab, OP_OpenRead);
-	sqlite3VdbeLoadString(v, regTabname, pTab->def->name);
 	/*
-	 * Here we need real space from Tarantool DD since
-	 * further it is passed to cursor opening routine.
+	 * Open a read-only cursor on the table. Also allocate
+	 * a cursor number to use for scanning indexes.
 	 */
-	struct space *space = space_by_id(pTab->def->id);
-	assert(space != NULL);
+	iTabCur = pParse->nTab;
+	pParse->nTab += 2;
+	assert(space->index_count != 0);
+	sqlite3VdbeAddOp4(v, OP_OpenRead, iTabCur, 0, 0, (void *) space,
+			  P4_SPACEPTR);
+	sqlite3VdbeLoadString(v, regTabname, space->def->name);
 	for (uint32_t j = 0; j < space->index_count; ++j) {
-		struct index *idx = pTab->space->index[j];
+		struct index *idx = space->index[j];
 		int addrRewind;	/* Address of "OP_Rewind iIdxCur" */
 		int addrNextRow;	/* Address of "next_row:" */
 		const char *idx_name;	/* Name of the index */
@@ -834,14 +829,14 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		 * instead more familiar table name.
 		 */
 		if (idx->def->iid == 0)
-			idx_name = pTab->def->name;
+			idx_name = space->def->name;
 		else
 			idx_name = idx->def->name;
 		int part_count = idx->def->key_def->part_count;
 
 		/* Populate the register containing the index name. */
 		sqlite3VdbeLoadString(v, regIdxname, idx_name);
-		VdbeComment((v, "Analysis for %s.%s", pTab->def->name,
+		VdbeComment((v, "Analysis for %s.%s", space->def->name,
 			    idx_name));
 
 		/*
@@ -884,9 +879,16 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		pParse->nMem = MAX(pParse->nMem, regPrev + part_count);
 
 		/* Open a read-only cursor on the index being analyzed. */
-		sqlite3VdbeAddOp4(v, OP_OpenRead, iIdxCur, idx->def->iid, 0,
-				  (void *) space, P4_SPACEPTR);
-		VdbeComment((v, "%s", idx->def->name));
+		if (j != 0) {
+			iIdxCur = pParse->nTab - 1;
+			sqlite3VdbeAddOp4(v, OP_OpenRead, iIdxCur,
+					  idx->def->iid, 0,
+					  (void *) space, P4_SPACEPTR);
+			VdbeComment((v, "%s", idx->def->name));
+		} else {
+			/* We have already opened cursor on PK. */
+			iIdxCur = iTabCur;
+		}
 
 		/* Invoke the stat_init() function. The arguments are:
 		 *
@@ -989,7 +991,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		 *   if !eof(csr) goto next_row;
 		 */
 		assert(regKey == (regStat4 + 2));
-		struct index *pPk = sql_table_primary_key(pTab);
+		struct index *pPk = space_index(space, 0);
 		int pk_part_count = pPk->def->key_def->part_count;
 		/* Allocate memory for array. */
 		pParse->nMem = MAX(pParse->nMem,
@@ -997,10 +999,10 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		int regKeyStat = regPrev + part_count;
 		for (i = 0; i < pk_part_count; i++) {
 			uint32_t k = pPk->def->key_def->parts[i].fieldno;
-			assert(k < pTab->def->field_count);
+			assert(k < space->def->field_count);
 			sqlite3VdbeAddOp3(v, OP_Column, iIdxCur, k,
 					  regKeyStat + i);
-			VdbeComment((v, "%s", pTab->def->fields[k].name));
+			VdbeComment((v, "%s", space->def->fields[k].name));
 		}
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regKeyStat,
 				  pk_part_count, regKey);
@@ -1017,7 +1019,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		assert("BBB"[0] == AFFINITY_TEXT);
 		sqlite3VdbeAddOp4(v, OP_MakeRecord, regTabname, 3, regTemp,
 				  "BBB", 0);
-		sqlite3VdbeAddOp2(v, OP_IdxInsert, iStatCur, regTemp);
+		sqlite3VdbeAddOp2(v, OP_IdxInsert, stat_cursor, regTemp);
 
 		/* Add the entries to the stat4 table. */
 
@@ -1054,7 +1056,7 @@ analyzeOneTable(Parse * pParse,	/* Parser context */
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regCol, part_count,
 				  regSample);
 		sqlite3VdbeAddOp3(v, OP_MakeRecord, regTabname, 6, regTemp);
-		sqlite3VdbeAddOp2(v, OP_IdxReplace, iStatCur + 1, regTemp);
+		sqlite3VdbeAddOp2(v, OP_IdxReplace, stat_cursor + 1, regTemp);
 		sqlite3VdbeAddOp2(v, OP_Goto, 1, addrNext);	/* P1==1 for end-of-loop */
 		sqlite3VdbeJumpHere(v, addrIsNull);
 
@@ -1076,27 +1078,43 @@ loadAnalysis(Parse * pParse)
 	}
 }
 
-/*
- * Generate code that will do an analysis of an entire database
+/**
+ * Wrapper to pass args to space_foreach callback.
+ */
+struct analyze_data {
+	struct Parse *parse_context;
+	/**
+	 * Cursor numbers pointing to stat spaces:
+	 * stat_cursor is opened on _sql_stat1 and
+	 * stat_cursor + 1 - on _sql_stat4.
+	 */
+	int stat_cursor;
+};
+
+static int
+sql_space_foreach_analyze(struct space *space, void *data)
+{
+	if (space->def->opts.sql == NULL || space->def->opts.is_view)
+		return 0;
+	struct analyze_data *anal_data = (struct analyze_data *) data;
+	vdbe_emit_analyze_space(anal_data->parse_context, space,
+				anal_data->stat_cursor);
+	return 0;
+}
+
+/**
+ * Generate code that will do an analysis of all spaces created
+ * via SQL facilities.
  */
 static void
-sql_analyze_database(Parse *parser)
+sql_analyze_database(struct Parse *parser)
 {
-	struct Schema *schema = parser->db->pSchema;
 	sql_set_multi_write(parser, false);
 	int stat_cursor = parser->nTab;
-	parser->nTab += 3;
+	parser->nTab += 2;
 	vdbe_emit_stat_space_open(parser, stat_cursor, NULL);
-	int reg = parser->nMem + 1;
-	int tab_cursor = parser->nTab;
-	for (struct HashElem *k = sqliteHashFirst(&schema->tblHash); k != NULL;
-	     k = sqliteHashNext(k)) {
-		struct Table *table = (struct Table *) sqliteHashData(k);
-		if (! table->def->opts.is_view) {
-			analyzeOneTable(parser, table, stat_cursor, reg,
-					tab_cursor);
-		}
-	}
+	struct analyze_data anal_data = { parser, stat_cursor };
+	space_foreach(sql_space_foreach_analyze, (void *) &anal_data);
 	loadAnalysis(parser);
 }
 
@@ -1108,15 +1126,18 @@ sql_analyze_database(Parse *parser)
  * @param table Target table to analyze.
  */
 static void
-vdbe_emit_analyze_table(struct Parse *parse, struct Table *table)
+vdbe_emit_analyze_table(struct Parse *parse, struct space *space)
 {
-	assert(table != NULL);
+	assert(space != NULL);
 	sql_set_multi_write(parse, false);
+	/*
+	 * There are two system spaces for statistics: _sql_stat1
+	 * and _sql_stat4.
+	 */
 	int stat_cursor = parse->nTab;
-	parse->nTab += 3;
-	vdbe_emit_stat_space_open(parse, stat_cursor, table->def->name);
-	analyzeOneTable(parse, table, stat_cursor, parse->nMem + 1,
-			parse->nTab);
+	parse->nTab += 2;
+	vdbe_emit_stat_space_open(parse, stat_cursor, space->def->name);
+	vdbe_emit_analyze_space(parse, space, stat_cursor);
 	loadAnalysis(parse);
 }
 
@@ -1142,15 +1163,21 @@ sqlite3Analyze(Parse * pParse, Token * pName)
 		/* Form 2:  Analyze table named */
 		char *z = sqlite3NameFromToken(db, pName);
 		if (z != NULL) {
-			Table *pTab = sqlite3LocateTable(pParse, 0, z);
-			if (pTab != NULL) {
-				if (pTab->def->opts.is_view) {
+			uint32_t space_id = box_space_id_by_name(z, strlen(z));
+			if (space_id != BOX_ID_NIL) {
+				struct space *sp = space_by_id(space_id);
+				assert(sp != NULL);
+				if (sp->def->opts.is_view) {
 					sqlite3ErrorMsg(pParse, "VIEW isn't "\
 							"allowed to be "\
 							"analyzed");
 				} else {
-					vdbe_emit_analyze_table(pParse, pTab);
+					vdbe_emit_analyze_table(pParse, sp);
 				}
+			} else {
+				diag_set(ClientError, ER_NO_SUCH_SPACE, z);
+				pParse->rc = SQL_TARANTOOL_ERROR;
+				pParse->nErr++;
 			}
 			sqlite3DbFree(db, z);
 		}
