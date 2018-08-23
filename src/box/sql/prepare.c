@@ -140,14 +140,6 @@ sqlite3InitDatabase(sqlite3 * db)
 
 	memset(&init, 0, sizeof(init));
 	init.db = db;
-
-	/* Load schema from Tarantool - into the primary db only. */
-	tarantoolSqlite3LoadSchema(&init);
-
-	if (init.rc) {
-		rc = init.rc;
-		goto error_out;
-	}
 	/* Read the schema information out of the schema tables
 	 */
 	assert(db->init.busy);
@@ -159,11 +151,6 @@ sqlite3InitDatabase(sqlite3 * db)
 	if (db->mallocFailed) {
 		rc = SQLITE_NOMEM_BKPT;
 		sqlite3ResetAllSchemasOfConnection(db);
-	}
-
- error_out:
-	if (rc == SQLITE_NOMEM || rc == SQLITE_IOERR_NOMEM) {
-		sqlite3OomFault(db);
 	}
 	return rc;
 }
