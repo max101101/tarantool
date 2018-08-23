@@ -38,6 +38,7 @@
 #include "box/session.h"
 #include "box/schema.h"
 #include "bit/bit.h"
+#include "box/box.h"
 
 /*
  * Generate code that will open pTab as cursor iCur.
@@ -149,7 +150,6 @@ vdbe_has_table_read(struct Parse *parser, const struct Table *table)
 	}
 	return false;
 }
-
 
 /* Forward declaration */
 static int
@@ -314,7 +314,7 @@ sqlite3Insert(Parse * pParse,	/* Parser context */
 	zTab = pTabList->a[0].zName;
 	if (NEVER(zTab == 0))
 		goto insert_cleanup;
-	pTab = sql_list_lookup_table(pParse, pTabList);
+	pTab = sql_lookup_table(pParse, pTabList->a);
 	if (pTab == NULL)
 		goto insert_cleanup;
 
@@ -1161,7 +1161,6 @@ xferOptimization(Parse * pParse,	/* Parser context */
 		 int onError)		/* How to handle constraint errors */
 {
 	ExprList *pEList;	/* The result set of the SELECT */
-	Table *pSrc;		/* The table in the FROM clause of SELECT */
 	struct index *pSrcIdx, *pDestIdx;
 	struct SrcList_item *pItem;	/* An element of pSelect->pSrc */
 	int i;			/* Loop counter */
@@ -1234,40 +1233,40 @@ xferOptimization(Parse * pParse,	/* Parser context */
 	 * we have to check the semantics.
 	 */
 	pItem = pSelect->pSrc->a;
-	pSrc = sqlite3LocateTable(pParse, 0, pItem->zName);
+	uint32_t src_id = box_space_id_by_name(pItem->zName,
+						strlen(pItem->zName));
 	/* FROM clause does not contain a real table. */
-	if (pSrc == NULL)
+	if (src_id == BOX_ID_NIL)
 		return 0;
+	struct space *src = space_by_id(src_id);
+	assert(src != NULL);
 	/* Src and dest may not be the same table. */
-	if (pSrc == pDest)
+	if (src->def->id == pDest->space->def->id)
 		return 0;
 	/* Src may not be a view. */
-	if (pSrc->def->opts.is_view)
+	if (src->def->opts.is_view)
 		return 0;
 	/* Number of columns must be the same in src and dst. */
-	if (pDest->def->field_count != pSrc->def->field_count)
+	if (pDest->def->field_count != src->def->field_count)
 		return 0;
 	for (i = 0; i < (int)pDest->def->field_count; i++) {
 		enum affinity_type dest_affinity =
 			pDest->def->fields[i].affinity;
 		enum affinity_type src_affinity =
-			pSrc->def->fields[i].affinity;
+			src->def->fields[i].affinity;
 		/* Affinity must be the same on all columns. */
 		if (dest_affinity != src_affinity)
 			return 0;
 		uint32_t id;
 		if (sql_column_collation(pDest->def, i, &id) !=
-		    sql_column_collation(pSrc->def, i, &id)) {
-			return 0;	/* Collating sequence must be the same on all columns */
-		}
-		if (!pDest->def->fields[i].is_nullable
-		    && pSrc->def->fields[i].is_nullable) {
-			return 0;	/* tab2 must be NOT NULL if tab1 is */
-		}
+		    sql_column_collation(src->def, i, &id))
+			return 0;
+		if (!pDest->def->fields[i].is_nullable &&
+		    src->def->fields[i].is_nullable)
+			return 0;
 		/* Default values for second and subsequent columns need to match. */
 		if (i > 0) {
-			char *src_expr_str =
-				pSrc->def->fields[i].default_value;
+			char *src_expr_str = src->def->fields[i].default_value;
 			char *dest_expr_str =
 				pDest->def->fields[i].default_value;
 			if ((dest_expr_str == NULL) != (src_expr_str == NULL) ||
@@ -1282,8 +1281,8 @@ xferOptimization(Parse * pParse,	/* Parser context */
 		pDestIdx = pDest->space->index[i];
 		if (pDestIdx->def->opts.is_unique)
 			destHasUniqueIdx = 1;
-		for (uint32_t j = 0; j < pSrc->space->index_count; ++j) {
-			pSrcIdx = pSrc->space->index[j];
+		for (uint32_t j = 0; j < src->index_count; ++j) {
+			pSrcIdx = src->index[j];
 			if (sql_index_is_xfer_compatible(pDestIdx->def,
 							 pSrcIdx->def))
 				break;
@@ -1293,7 +1292,7 @@ xferOptimization(Parse * pParse,	/* Parser context */
 			return 0;
 	}
 	/* Get server checks. */
-	ExprList *pCheck_src = space_checks_expr_list(pSrc->def->id);
+	ExprList *pCheck_src = space_checks_expr_list(src->def->id);
 	ExprList *pCheck_dest = space_checks_expr_list(pDest->def->id);
 	if (pCheck_dest != NULL &&
 	    sqlite3ExprListCompare(pCheck_src, pCheck_dest, -1) != 0) {
@@ -1353,11 +1352,8 @@ xferOptimization(Parse * pParse,	/* Parser context */
 	}
 
 		assert(pSrcIdx);
-		struct space *src_space =
-			space_by_id(pSrc->def->id);
-		vdbe_emit_open_cursor(pParse, iSrc,
-				      pSrcIdx->def->iid,
-				      src_space);
+
+		vdbe_emit_open_cursor(pParse, iSrc, pSrcIdx->def->iid, src);
 		VdbeComment((v, "%s", pSrcIdx->def->name));
 		struct space *dest_space = space_by_id(pDest->def->id);
 		vdbe_emit_open_cursor(pParse, iDest,

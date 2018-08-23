@@ -217,22 +217,10 @@ sqlite3CommitInternalChanges()
 	current_session()->sql_flags &= ~SQLITE_InternChanges;
 }
 
-/*
- * Return true if given column is part of primary key.
- * If field number is less than 63, corresponding bit
- * in column mask is tested. Otherwise, check whether 64-th bit
- * in mask is set or not. If it is set, then iterate through
- * key parts of primary index and check field number.
- * In case it isn't set, there are no key columns among
- * the rest of fields.
- */
 bool
-table_column_is_in_pk(Table *table, uint32_t column)
+sql_space_column_is_in_pk(struct space *space, uint32_t column)
 {
-	struct space *space = space_by_id(table->def->id);
-	assert(space != NULL);
-
-	struct index *primary_idx = index_find(space, 0 /* PK */);
+	struct index *primary_idx = space->index[0];
 	/* Views don't have any indexes. */
 	if (primary_idx == NULL)
 		return false;

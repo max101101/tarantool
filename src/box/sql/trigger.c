@@ -204,18 +204,14 @@ sql_trigger_finish(struct Parse *parse, struct TriggerStep *step_list,
 		if (v == 0)
 			goto triggerfinish_cleanup;
 
-		struct Table *sys_trigger =
-			sqlite3HashFind(&parse->db->pSchema->tblHash,
-					TARANTOOL_SYS_TRIGGER_NAME);
-		if (NEVER(sys_trigger == NULL))
-			goto triggerfinish_cleanup;
-
 		sql_str = sqlite3MPrintf(db, "CREATE TRIGGER %s", token->z);
 		if (db->mallocFailed)
 			goto triggerfinish_cleanup;
 
 		int cursor = parse->nTab++;
-		sqlite3OpenTable(parse, cursor, sys_trigger, OP_OpenWrite);
+		struct space *_trigger = space_by_id(BOX_TRIGGER_ID);
+		assert(_trigger != NULL);
+		vdbe_emit_open_cursor(parse, cursor, 0, _trigger);
 
 		/*
 		 * makerecord(cursor(iRecord),
