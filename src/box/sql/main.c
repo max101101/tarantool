@@ -1859,7 +1859,6 @@ sql_init_db(sqlite3 **out_db)
 	db->szMmap = sqlite3GlobalConfig.szMmap;
 	db->nMaxSorterMmap = 0x7FFFFFFF;
 
-	db->pSchema = NULL;
 	db->magic = SQLITE_MAGIC_OPEN;
 	if (db->mallocFailed) {
 		goto opendb_out;

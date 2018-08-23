@@ -1428,7 +1428,6 @@ void *sqlite3_wsd_find(void *K, int L);
 typedef struct AggInfo AggInfo;
 typedef struct Bitvec Bitvec;
 typedef struct Column Column;
-typedef struct Schema Schema;
 typedef struct Expr Expr;
 typedef struct ExprList ExprList;
 typedef struct ExprSpan ExprSpan;
@@ -1475,13 +1474,6 @@ typedef int VList;
 #include "cursor.h"
 #include "vdbe.h"
 #include "os.h"
-
-/*
- * An instance of the following structure stores a database schema.
- */
-struct Schema {
-	Hash tblHash;		/* All tables indexed by name */
-};
 
 /*
  * The number of different kinds of things that can be limited
@@ -1543,7 +1535,6 @@ struct sqlite3 {
 	sqlite3_vfs *pVfs;	/* OS Interface */
 	struct Vdbe *pVdbe;	/* List of active virtual machines */
 	struct coll *pDfltColl;	/* The default collating sequence (BINARY) */
-	struct Schema *pSchema; /* Schema of the database */
 	i64 szMmap;		/* Default mmap_size setting */
 	int errCode;		/* Most recent error code (SQLITE_*) */
 	int errMask;		/* & result codes with this before returning */
@@ -2355,7 +2346,6 @@ struct SrcList {
 	int nSrc;		/* Number of tables or subqueries in the FROM clause */
 	u32 nAlloc;		/* Number of entries allocated in a[] below */
 	struct SrcList_item {
-		Schema *pSchema;	/* Schema to which this item is fixed */
 		char *zName;	/* Name of the table */
 		char *zAlias;	/* The "B" part of a "A AS B" phrase.  zName is the "A" */
 		Table *pTab;	/* An SQL table corresponding to zName */
@@ -2982,19 +2972,6 @@ struct StrAccum {
 
 #define isMalloced(X)  (((X)->printfFlags & SQLITE_PRINTF_MALLOCED)!=0)
 
-/**
- * A pointer to this structure is used to communicate information
- * from sqlite3Init and OP_ParseSchema into the sql_init_callback.
- */
-struct init_data {
-	/** The database being initialized. */
-	sqlite3 *db;
-	/** Error message stored here. */
-	char **pzErrMsg;
-	/** Result code stored here. */
-	int rc;
-};
-
 /*
  * Structure containing global configuration data for the SQLite library.
  *
@@ -3334,27 +3311,8 @@ u32 sqlite3ExprListFlags(const ExprList *);
 int sqlite3Init(sqlite3 *);
 
 void sqlite3Pragma(Parse *, Token *, Token *, Token *, int);
-void sqlite3ResetAllSchemasOfConnection(sqlite3 *);
 void sqlite3CommitInternalChanges();
 void sqlite3DeleteColumnNames(sqlite3 *, Table *);
-
-/**
- * This is the callback routine for the code that initializes the
- * database.  See sqlite3Init() below for additional information.
- * This routine is also called from the OP_ParseSchema2 opcode of
- * the VDBE.
- *
- * @param init Initialization context.
- * @param name Name of thing being created.
- * @param space_id Space identifier.
- * @param index_id Index identifier.
- * @param sql Text of SQL query.
- *
- * @retval 0 on success, 1 otherwise.
- */
-int
-sql_init_callback(struct init_data *init, const char *name,
-		  uint32_t space_id, uint32_t index_id, const char *sql);
 
 /**
  * Return true if given column is part of primary key.
@@ -3697,23 +3655,6 @@ void sqlite3ExprIfFalse(Parse *, Expr *, int, int);
 void sqlite3ExprIfFalseDup(Parse *, Expr *, int, int);
 #define LOCATE_VIEW    0x01
 #define LOCATE_NOERR   0x02
-Table *sqlite3LocateTable(Parse *, u32 flags, const char *);
-
-struct index *
-sqlite3LocateIndex(sqlite3 *, const char *, const char *);
-void sqlite3UnlinkAndDeleteTable(sqlite3 *, const char *);
-
-/**
- * Release memory for index with given iid and
- * reallocate memory for an array of indexes.
- * FIXME: should be removed after finishing merging SQLite DD
- * with server one.
- *
- * @param space Space which index belongs to.
- * @param iid Id of index to be deleted.
- */
-void
-sql_space_index_delete(struct space *space, uint32_t iid);
 
 char *sqlite3NameFromToken(sqlite3 *, Token *);
 int sqlite3ExprCompare(Expr *, Expr *, int);
@@ -4561,8 +4502,6 @@ sql_analysis_load(struct sqlite3 *db);
 
 void sqlite3RegisterLikeFunctions(sqlite3 *, int);
 int sqlite3IsLikeFunction(sqlite3 *, Expr *, int *, char *);
-void sqlite3SchemaClear(sqlite3 *);
-Schema *sqlite3SchemaCreate(sqlite3 *);
 int sqlite3CreateFunc(sqlite3 *, const char *, int, int, void *,
 		      void (*)(sqlite3_context *, int, sqlite3_value **),
 		      void (*)(sqlite3_context *, int, sqlite3_value **),

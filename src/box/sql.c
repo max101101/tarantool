@@ -76,36 +76,32 @@ sql_init()
 		panic("failed to initialize SQL subsystem");
 
 	assert(db != NULL);
-	/*
-	 * Initialize pSchema to use SQL parser on initialization:
-	 * e.g. Trigger objects (compiled from SQL on tuple
-	 * insertion in _trigger) need to refer it.
-	 */
-	db->pSchema = sqlite3SchemaCreate(db);
-	if (db->pSchema == NULL) {
-		sqlite3_close(db);
-		panic("failed to initialize SQL Schema subsystem");
-	}
 }
 
 void
 sql_load_schema()
 {
-	assert(db->pSchema != NULL);
-	int rc;
 	struct session *user_session = current_session();
 	int commit_internal = !(user_session->sql_flags
 				& SQLITE_InternChanges);
 
 	assert(db->init.busy == 0);
+	/*
+	 * This function is called before version upgrade.
+	 * Old versions (< 2.0) lack system spaces containing
+	 * statistics (_sql_stat1 and _sql_stat4). Thus, we can
+	 * skip statistics loading.
+	 */
+	struct space *stat = space_by_id(BOX_SQL_STAT1_ID);
+	assert(stat != NULL);
+	if (stat->def->field_count == 0)
+		return;
 	db->init.busy = 1;
-	rc = sqlite3InitDatabase(db);
-	if (rc != SQLITE_OK) {
-		sqlite3SchemaClear(db);
+	sql_analysis_load(db);
+	if (db->errCode != SQLITE_OK)
 		panic("failed to initialize SQL subsystem");
-	}
 	db->init.busy = 0;
-	if (rc == SQLITE_OK && commit_internal)
+	if (commit_internal)
 		sqlite3CommitInternalChanges();
 }
 
@@ -1492,14 +1488,16 @@ sql_ephemeral_table_new(Parse *parser, const char *name)
 		sqlite3DbFree(db, table);
 		return NULL;
 	}
-	table->space = (struct space *) calloc(1, sizeof(struct space));
+	table->space = (struct space *) region_alloc(&parser->region,
+						     sizeof(struct space));
 	if (table->space == NULL) {
-		diag_set(OutOfMemory, sizeof(struct space), "calloc", "space");
+		diag_set(OutOfMemory, sizeof(struct space), "region", "space");
 		parser->rc = SQL_TARANTOOL_ERROR;
 		parser->nErr++;
 		sqlite3DbFree(db, table);
 		return NULL;
 	}
+	memset(table->space, 0, sizeof(struct space));
 
 	table->def = def;
 	return table;

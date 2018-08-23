@@ -56,7 +56,7 @@ sql_lookup_table(struct Parse *parse, struct SrcList_item *tbl_name)
 	struct Table *table = sqlite3DbMallocZero(parse->db, sizeof(*table));
 	if (table == NULL)
 		return NULL;
-	table->def = space_def_dup(space->def);
+	table->def = space->def;
 	table->space = space;
 	table->nTabRef = 1;
 	tbl_name->pTab = table;
