@@ -1295,6 +1295,45 @@ resolveSelectStep(Walker * pWalker, Select * p)
 		 * expression, do not allow aggregates in any of the other expressions.
 		 */
 		assert((p->selFlags & SF_Aggregate) == 0);
+		/*
+		 * A query with a HAVING clause should also have
+		 * a group by clause. If GROUP BY is ommited, all
+		 * the rows not excluded by the where clause
+		 * return as a single group built with primary
+		 * key.
+		 */
+		if (p->pHaving != NULL && p->pGroupBy == NULL) {
+			if (p->pSrc->nSrc != 1) {
+				diag_set(ClientError, ER_SQL,
+					"GROUP BY may be ommited only when one "
+					"source table specified");
+				pParse->nErr++;
+				pParse->rc = SQL_TARANTOOL_ERROR;
+				return WRC_Abort;
+			}
+			struct space_def *def = p->pSrc->a->pTab->def;
+			struct Index *pk =
+				sqlite3PrimaryKeyIndex(p->pSrc->a->pTab);
+			assert(pk != NULL);
+			struct key_part *part = pk->def->key_def->parts;
+			struct key_part *part_end =
+				part + pk->def->key_def->part_count;
+			for (; part < part_end && !db->mallocFailed; part++) {
+				struct Token pk_column;
+				char *col_name =
+					def->fields[part->fieldno].name;
+				sqlite3TokenInit(&pk_column, col_name);
+				struct Expr *pk_part =
+					sqlite3ExprAlloc(db, TK_ID,
+							 &pk_column, 0);
+				p->pGroupBy =
+					sql_expr_list_append(db, p->pGroupBy,
+							     pk_part);
+			}
+			/* Memory allocation error. */
+			if (db->mallocFailed != 0)
+				return WRC_Abort;
+		}
 		pGroupBy = p->pGroupBy;
 		if (pGroupBy || (sNC.ncFlags & NC_HasAgg) != 0) {
 			assert(NC_MinMaxAgg == SF_MinMaxAgg);
@@ -1302,14 +1341,6 @@ resolveSelectStep(Walker * pWalker, Select * p)
 			    SF_Aggregate | (sNC.ncFlags & NC_MinMaxAgg);
 		} else {
 			sNC.ncFlags &= ~NC_AllowAgg;
-		}
-
-		/* If a HAVING clause is present, then there must be a GROUP BY clause.
-		 */
-		if (p->pHaving && !pGroupBy) {
-			sqlite3ErrorMsg(pParse,
-					"a GROUP BY clause is required before HAVING");
-			return WRC_Abort;
 		}
 
 		/* Add the output column list to the name-context before parsing the

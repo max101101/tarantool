@@ -196,11 +196,11 @@ test:do_catchsql_test("select3-2.14", [[
 
 -- Cannot have a HAVING without a GROUP BY
 --
-test:do_catchsql_test("select3-3.1", [[
+test:do_execsql_test("select3-3.1", [[
   SELECT log, count(*) FROM t1 HAVING log>=4
 ]], {
   -- <select3-3.1>
-  1, "a GROUP BY clause is required before HAVING"
+  4,1,4,1,4,1,4,1,4,1,4,1,4,1,4,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1,5,1
   -- </select3-3.1>
 })
 
