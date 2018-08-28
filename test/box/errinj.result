@@ -16,6 +16,8 @@ errinj.info()
     state: 0
   ERRINJ_WAL_WRITE:
     state: false
+  ERRINJ_XLOG_BREAK_LSN:
+    state: -1
   ERRINJ_HTTPC_EXECUTE:
     state: false
   ERRINJ_VYRUN_DATA_READ:
@@ -60,6 +62,8 @@ errinj.info()
     state: false
   ERRINJ_WAL_WRITE_DISK:
     state: false
+  ERRINJ_RELAY_BREAK_LSN:
+    state: -1
   ERRINJ_VY_LOG_FILE_RENAME:
     state: false
   ERRINJ_VY_RUN_WRITE:
